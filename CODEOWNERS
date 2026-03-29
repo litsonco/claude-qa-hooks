@@ -1,0 +1,45 @@
+# Claude QA Hooks — CODEOWNERS
+#
+# When Claude creates PRs that touch these paths, GitHub will auto-request
+# review from the listed owners. This ensures senior devs review:
+#   - Security-sensitive code
+#   - Infrastructure and auth changes
+#   - Payment processing logic
+#   - The QA hooks themselves
+#
+# Configure these handles for your team. Example:
+#   @your-org/senior-devs
+#   @your-org/security-team
+
+# --- Security-sensitive paths (MUST have human review) ---
+# Auth, sessions, tokens, permissions
+**/auth/**                    @litsonco/senior-devs
+**/middleware/auth*           @litsonco/senior-devs
+**/permissions/**             @litsonco/senior-devs
+**/*session*                  @litsonco/senior-devs
+**/*token*                    @litsonco/senior-devs
+
+# Payments and billing
+**/payments/**                @litsonco/senior-devs
+**/billing/**                 @litsonco/senior-devs
+**/stripe/**                  @litsonco/senior-devs
+**/subscriptions/**           @litsonco/senior-devs
+
+# Infrastructure and deployment
+**/Dockerfile                 @litsonco/senior-devs
+**/docker-compose*            @litsonco/senior-devs
+**/.github/workflows/**       @litsonco/senior-devs
+**/deploy/**                  @litsonco/senior-devs
+**/*.tf                       @litsonco/senior-devs
+
+# Environment and secrets
+**/.env*                      @litsonco/senior-devs
+**/secrets/**                 @litsonco/senior-devs
+
+# Database migrations
+**/migrations/**              @litsonco/senior-devs
+**/migrate/**                 @litsonco/senior-devs
+
+# --- QA hooks themselves ---
+scripts/**                    @litsonco/senior-devs
+install.sh                    @litsonco/senior-devs

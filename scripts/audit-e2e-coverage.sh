@@ -11,6 +11,36 @@
 
 set -uo pipefail
 
+# --- Help ---
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    cat <<'HELP'
+Usage: audit-e2e-coverage.sh [project-dir]
+
+Compares API routes/pages against E2E test specs and reports gaps.
+
+Supported project types:
+  Express/Node   Scans src/routes/*.ts    → expects e2e/<route>.spec.ts
+  FastAPI/Python  Scans app/routers/*.py   → expects e2e/<router>.spec.ts
+  Next.js         Scans app/**/page.tsx    → expects e2e/web/<page>.spec.ts
+
+Options:
+  --help, -h     Show this help message
+  --json         Output results as JSON (for scripting/cron)
+
+Examples:
+  ~/.claude/scripts/audit-e2e-coverage.sh /path/to/project
+  ~/.claude/scripts/audit-e2e-coverage.sh --json /path/to/project
+HELP
+    exit 0
+fi
+
+# --- JSON output mode ---
+JSON_MODE=false
+if [ "${1:-}" = "--json" ]; then
+    JSON_MODE=true
+    shift
+fi
+
 PROJECT_DIR="${1:-$(pwd)}"
 cd "$PROJECT_DIR"
 
@@ -119,16 +149,20 @@ for app_dir in apps/*/; do
 done
 
 # --- Summary ---
-echo ""
-echo "================================================"
-if [ $GAPS -gt 0 ]; then
-    echo "⚠️  $GAPS route(s) missing E2E coverage"
-    echo ""
-    echo "To fix, create specs in e2e/ for each ❌ route."
-    echo "Template: ~/.claude/scripts/audit-e2e-coverage.sh --help"
+if [ "$JSON_MODE" = "true" ]; then
+    jq -n --arg project "$(basename "$PROJECT_DIR")" --argjson gaps "$GAPS" \
+      '{project:$project,gaps:$gaps,status:(if $gaps > 0 then "gaps_found" else "all_covered" end)}'
 else
-    echo "✅ All detected routes have E2E specs"
+    echo ""
+    echo "================================================"
+    if [ $GAPS -gt 0 ]; then
+        echo "⚠️  $GAPS route(s) missing E2E coverage"
+        echo ""
+        echo "To fix, create specs in e2e/ for each ❌ route."
+    else
+        echo "✅ All detected routes have E2E specs"
+    fi
+    echo ""
 fi
-echo ""
 
 exit $GAPS

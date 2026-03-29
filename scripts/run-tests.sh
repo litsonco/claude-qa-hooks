@@ -5,10 +5,39 @@
 # Receives JSON on stdin: { "tool_input": { "file_path": "/path/to/file" } }
 # Detects project type and runs the appropriate test suite.
 #
+# NOTE: Type-checking is handled by verify-build.sh (runs first in the hook chain).
+# This script only runs tests — no duplicate tsc calls.
+#
 # Output: JSON with test results for Claude to act on.
-# Exit: 0 = all passed, 1 = failures found, 2 = couldn't run tests
+# Exit: 0 = all passed, 1 = failures found
 
 set -uo pipefail
+
+# Allow skipping via env var
+if [ "${CLAUDE_SKIP_TESTS:-}" = "true" ]; then
+    exit 0
+fi
+
+# QA log location
+QA_LOG="${CLAUDE_QA_LOG:-$HOME/.claude/qa-log.jsonl}"
+
+# Helper: emit structured JSON output safely via jq
+emit() {
+    local ctx="$1"
+    jq -n --arg ctx "$ctx" \
+      '{hookSpecificOutput:{hookEventName:"PostToolUse",additionalContext:$ctx}}'
+}
+
+# Helper: append to QA log
+log_result() {
+    local status="$1" framework="$2" detail="$3"
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    jq -n --arg ts "$timestamp" --arg file "$FILE_PATH" --arg status "$status" \
+          --arg fw "$framework" --arg detail "$detail" \
+      '{timestamp:$ts,hook:"run-tests",file:$file,status:$status,framework:$fw,detail:$detail}' \
+      >> "$QA_LOG" 2>/dev/null || true
+}
 
 INPUT=$(cat)
 FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // .file_path // empty' 2>/dev/null)
@@ -33,13 +62,11 @@ find_up() {
 }
 
 PROJECT_ROOT=$(find_up "$(dirname "$FILE_PATH")" "package.json") || exit 0
-PROJECT_NAME=$(basename "$PROJECT_ROOT")
 
 # --- Detect test framework ---
 HAS_PLAYWRIGHT=false
 HAS_JEST=false
 HAS_VITEST=false
-TEST_CMD=""
 
 if [ -f "$PROJECT_ROOT/playwright.config.ts" ] || [ -f "$PROJECT_ROOT/playwright.config.js" ]; then
     HAS_PLAYWRIGHT=true
@@ -64,27 +91,8 @@ case "$EXT" in
     md|json|yml|yaml|css|scss|png|jpg|svg) exit 0 ;;
 esac
 
-# --- Run type check first (fast) ---
-if [ -f "tsconfig.json" ] && ([ "$EXT" = "ts" ] || [ "$EXT" = "tsx" ]); then
-    TSC_OUTPUT=$(npx tsc --noEmit 2>&1) || true
-    if echo "$TSC_OUTPUT" | grep -q "error TS"; then
-        ERROR_COUNT=$(echo "$TSC_OUTPUT" | grep -c "error TS" || true)
-        ERRORS=$(echo "$TSC_OUTPUT" | grep "error TS" | head -10 | sed 's/"/\\"/g' | tr '\n' '|')
-        cat << ENDJSON
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PostToolUse",
-    "additionalContext": "❌ TypeScript: $ERROR_COUNT error(s). Fix type errors before running tests.\\nErrors:\\n$(echo "$ERRORS" | tr '|' '\n')"
-  }
-}
-ENDJSON
-        exit 1
-    fi
-fi
-
 # --- Run Playwright E2E if available and a route/handler/middleware was edited ---
 if [ "$HAS_PLAYWRIGHT" = "true" ]; then
-    # Only auto-run E2E for backend source changes (routes, handlers, middleware, store)
     SHOULD_RUN_E2E=false
     case "$RELATIVE_PATH" in
         src/routes/*|src/handlers/*|src/middleware/*|src/store.*|src/index.*|e2e/*)
@@ -92,8 +100,12 @@ if [ "$HAS_PLAYWRIGHT" = "true" ]; then
     esac
 
     if [ "$SHOULD_RUN_E2E" = "true" ]; then
-        E2E_OUTPUT=$(npx playwright test --reporter=line 2>&1) || true
-        E2E_EXIT=$?
+        # If a specific e2e spec was edited, only run that spec
+        if [[ "$RELATIVE_PATH" == e2e/*.spec.* ]]; then
+            E2E_OUTPUT=$(npx playwright test "$FILE_PATH" --reporter=line 2>&1) || true
+        else
+            E2E_OUTPUT=$(npx playwright test --reporter=line 2>&1) || true
+        fi
 
         # Parse results
         PASSED=$(echo "$E2E_OUTPUT" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' || echo "0")
@@ -101,26 +113,16 @@ if [ "$HAS_PLAYWRIGHT" = "true" ]; then
         TOTAL=$((PASSED + FAILED))
 
         if [ "$FAILED" = "0" ] && [ "$PASSED" != "0" ]; then
-            cat << ENDJSON
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PostToolUse",
-    "additionalContext": "✅ E2E Tests: $PASSED/$TOTAL passed"
-  }
-}
-ENDJSON
+            log_result "pass" "playwright" "$PASSED/$TOTAL passed"
+            emit "✅ E2E Tests: $PASSED/$TOTAL passed"
             exit 0
         elif [ "$FAILED" != "0" ]; then
-            # Extract failing test names and errors
-            FAIL_DETAILS=$(echo "$E2E_OUTPUT" | grep -A 2 "✘\|FAILED\|Error:" | head -30 | sed 's/"/\\"/g' | tr '\n' '|')
-            cat << ENDJSON
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PostToolUse",
-    "additionalContext": "❌ E2E Tests: $FAILED/$TOTAL failed\\n\\nFailing tests:\\n$(echo "$FAIL_DETAILS" | tr '|' '\n')"
-  }
-}
-ENDJSON
+            FAIL_DETAILS=$(echo "$E2E_OUTPUT" | grep -A 2 "✘\|FAILED\|Error:" | head -30)
+            log_result "fail" "playwright" "$FAILED/$TOTAL failed"
+            emit "❌ E2E Tests: $FAILED/$TOTAL failed
+
+Failing tests:
+$FAIL_DETAILS"
             exit 1
         fi
     fi
@@ -128,48 +130,40 @@ fi
 
 # --- Run Jest unit tests if available ---
 if [ "$HAS_JEST" = "true" ]; then
-    # Run related tests only (based on changed file)
-    JEST_OUTPUT=$(npx jest --passWithNoTests --findRelatedTests "$FILE_PATH" --no-coverage 2>&1) || true
+    JEST_OUTPUT=$(npx jest --passWithNoTests --findRelatedTests "$FILE_PATH" --no-coverage 2>&1)
+    JEST_EXIT=$?
 
-    if echo "$JEST_OUTPUT" | grep -q "Tests:.*failed"; then
-        FAIL_INFO=$(echo "$JEST_OUTPUT" | grep -E "FAIL|●|Tests:" | head -15 | sed 's/"/\\"/g' | tr '\n' '|')
-        cat << ENDJSON
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PostToolUse",
-    "additionalContext": "❌ Jest: tests failed\\n$(echo "$FAIL_INFO" | tr '|' '\n')"
-  }
-}
-ENDJSON
+    if [ $JEST_EXIT -ne 0 ] && echo "$JEST_OUTPUT" | grep -q "Tests:.*failed"; then
+        FAIL_INFO=$(echo "$JEST_OUTPUT" | grep -E "FAIL|●|Tests:" | head -15)
+        log_result "fail" "jest" "tests failed"
+        emit "❌ Jest: tests failed
+$FAIL_INFO"
         exit 1
     elif echo "$JEST_OUTPUT" | grep -q "Tests:.*passed"; then
         PASS_COUNT=$(echo "$JEST_OUTPUT" | grep -oE '[0-9]+ passed' | head -1 || echo "?")
-        cat << ENDJSON
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PostToolUse",
-    "additionalContext": "✅ Jest: $PASS_COUNT"
-  }
-}
-ENDJSON
+        log_result "pass" "jest" "$PASS_COUNT"
+        emit "✅ Jest: $PASS_COUNT"
         exit 0
     fi
 fi
 
-# --- Vitest ---
+# --- Vitest (with related file targeting) ---
 if [ "$HAS_VITEST" = "true" ]; then
-    VITEST_OUTPUT=$(npx vitest run --reporter=verbose 2>&1) || true
-    if echo "$VITEST_OUTPUT" | grep -q "Tests.*failed"; then
-        FAIL_INFO=$(echo "$VITEST_OUTPUT" | grep -E "FAIL|×|Tests" | head -15 | sed 's/"/\\"/g' | tr '\n' '|')
-        cat << ENDJSON
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PostToolUse",
-    "additionalContext": "❌ Vitest: tests failed\\n$(echo "$FAIL_INFO" | tr '|' '\n')"
-  }
-}
-ENDJSON
+    # Use --related to only run tests affected by the changed file
+    VITEST_OUTPUT=$(npx vitest run --reporter=verbose --related "$FILE_PATH" 2>&1)
+    VITEST_EXIT=$?
+
+    if [ $VITEST_EXIT -ne 0 ] && echo "$VITEST_OUTPUT" | grep -q "Tests.*failed"; then
+        FAIL_INFO=$(echo "$VITEST_OUTPUT" | grep -E "FAIL|×|Tests" | head -15)
+        log_result "fail" "vitest" "tests failed"
+        emit "❌ Vitest: tests failed
+$FAIL_INFO"
         exit 1
+    elif echo "$VITEST_OUTPUT" | grep -q "Tests.*passed"; then
+        PASS_COUNT=$(echo "$VITEST_OUTPUT" | grep -oE '[0-9]+ passed' | head -1 || echo "?")
+        log_result "pass" "vitest" "$PASS_COUNT"
+        emit "✅ Vitest: $PASS_COUNT"
+        exit 0
     fi
 fi
 
