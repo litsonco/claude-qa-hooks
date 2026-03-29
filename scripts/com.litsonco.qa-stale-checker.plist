@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.litsonco.qa-stale-checker</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>source ~/.zshrc 2>/dev/null; ~/.claude/scripts/stale-issue-checker.sh</string>
+    </array>
+
+    <!-- Run every 2 hours -->
+    <key>StartInterval</key>
+    <integer>7200</integer>
+
+    <!-- Also run shortly after boot/login -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Log output -->
+    <key>StandardOutPath</key>
+    <string>/tmp/qa-stale-checker.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/qa-stale-checker.log</string>
+
+    <!-- Don't run if already running -->
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>

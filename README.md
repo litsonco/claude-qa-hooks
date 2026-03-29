@@ -259,6 +259,87 @@ Edit `CODEOWNERS` to set your team's GitHub handles.
 
 ---
 
+## Notification System
+
+Humans get notified through multiple channels with escalating urgency:
+
+```
+Escalation happens
+    |
+    v
+IMMEDIATE (0h)
+    ├── macOS notification (pop-up + sound)
+    ├── Email to CLAUDE_QA_EMAIL (via SendGrid or system mail)
+    └── GitHub Issue created (triggers GitHub notification email)
+    |
+    v
+REMINDER (12h, no response)
+    ├── Email reminder: "This issue needs review"
+    └── GitHub Issue comment (triggers another notification)
+    |
+    v
+ESCALATION (24h, no response)
+    ├── Email to full team (CC list)
+    ├── GitHub Issue comment: "ESCALATION: 24-hour deadline passed"
+    └── 'urgent' label added to issue
+```
+
+### Setup
+
+Add to `~/.zshrc`:
+
+```bash
+# Required — where to send alerts
+export CLAUDE_QA_EMAIL=you@company.com
+
+# Required — repos to monitor for stale issues
+export CLAUDE_QA_REPOS='litsonco/clemency-backend,litsonco/storytime-magic'
+
+# Optional — CC on escalation emails
+export CLAUDE_QA_EMAIL_CC=team@company.com
+
+# Optional — enables reliable email delivery (falls back to system mail)
+export SENDGRID_API_KEY=SG.xxx
+```
+
+### How Notifications Are Sent
+
+| Channel | When | Requires |
+|---------|------|----------|
+| **macOS notification** | Every escalation (immediate) | macOS only, always works |
+| **Email (SendGrid)** | Every escalation + reminders | `SENDGRID_API_KEY` env var |
+| **Email (system mail)** | Fallback if no SendGrid | `/usr/bin/mail` (built into macOS) |
+| **GitHub notification** | Issue created/commented | GitHub email notifications enabled |
+
+### Stale Issue Checker (`stale-issue-checker.sh`)
+
+Runs every 2 hours via launchd (installed automatically on macOS). Finds open `needs-human` issues and sends reminders.
+
+```bash
+# Manual run
+~/.claude/scripts/stale-issue-checker.sh
+
+# Preview without sending
+~/.claude/scripts/stale-issue-checker.sh --dry-run
+
+# Custom thresholds
+~/.claude/scripts/stale-issue-checker.sh --remind-after 6 --escalate-after 12
+```
+
+### Direct Notification (`notify-human.sh`)
+
+Send a notification manually through all channels:
+
+```bash
+~/.claude/scripts/notify-human.sh \
+    --subject "Something needs attention" \
+    --body "Details here" \
+    --urgency high \
+    --issue-url "https://github.com/..."
+```
+
+---
+
 ## Codex Escalation Protocol
 
 When the build hook or test runner reports a failure, Claude follows this decision tree:
@@ -409,9 +490,12 @@ Returns `additionalContext` which is injected back into Claude's context window.
     verify-build.sh          # Layer 1: Build/type verification
     run-tests.sh             # Layer 2: Test runner
     audit-e2e-coverage.sh    # Layer 3: Coverage gap reporter
-    escalate-to-human.sh     # Layer 4: Human escalation via GitHub Issues
+    escalate-to-human.sh     # Layer 4: Human escalation via GitHub Issues + email
+    notify-human.sh          # Notification: Multi-channel alerts (macOS + email)
+    stale-issue-checker.sh   # Cron: 12h reminder, 24h team escalation
     flaky-test-detector.sh   # Analysis: Flaky test detection from QA log
     weekly-coverage-audit.sh # Cron: Weekly multi-project coverage report
+    com.litsonco.qa-stale-checker.plist  # macOS launchd config for stale checker
 
 Project root:
   CODEOWNERS                 # Auto-request review for security-sensitive paths
@@ -432,6 +516,11 @@ Project root:
 | `CLAUDE_QA_REVIEWER` | GitHub handle for issue assignment | (none) |
 | `CLAUDE_QA_LABELS` | Labels for escalation issues | `qa-hook,needs-human` |
 | `CLAUDE_QA_PROJECTS` | Comma-separated project dirs for weekly audit | (none) |
+| `CLAUDE_QA_EMAIL` | Primary notification email address | (none) |
+| `CLAUDE_QA_EMAIL_CC` | CC addresses for escalation emails | (none) |
+| `CLAUDE_QA_REPOS` | Comma-separated repos for stale issue checker | (none) |
+| `SENDGRID_API_KEY` | SendGrid API key for email delivery | (falls back to system mail) |
+| `SENDGRID_FROM_EMAIL` | From address for SendGrid emails | `qa@litson.co` |
 
 ### Customize test triggers
 

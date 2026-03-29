@@ -141,20 +141,48 @@ MERGED=$(echo "$EXISTING" | jq --argjson post "$POST_HOOKS" --argjson pre "$PRE_
 echo "$MERGED" > "$SETTINGS_FILE"
 echo "  Hooks configured in $SETTINGS_FILE"
 
+# --- Install stale issue checker cron (macOS launchd) ---
+echo "  Setting up stale issue checker..."
+PLIST_NAME="com.litsonco.qa-stale-checker"
+PLIST_SRC="$SCRIPTS_DIR/$PLIST_NAME.plist"
+PLIST_DST="$HOME/Library/LaunchAgents/$PLIST_NAME.plist"
+
+if [ "$(uname)" = "Darwin" ] && [ -f "$PLIST_SRC" ]; then
+    # Unload existing if present
+    launchctl bootout "gui/$(id -u)/$PLIST_NAME" 2>/dev/null || true
+    cp "$PLIST_SRC" "$PLIST_DST"
+    launchctl bootstrap "gui/$(id -u)" "$PLIST_DST" 2>/dev/null && \
+        echo "    + Stale issue checker cron installed (every 2 hours)" || \
+        echo "    - Could not install cron (run manually: launchctl bootstrap gui/\$(id -u) $PLIST_DST)"
+elif [ "$(uname)" = "Darwin" ]; then
+    echo "    - Plist not found, skipping cron setup"
+else
+    echo "    - Not macOS, skipping launchd setup. Add to crontab manually:"
+    echo "      0 */2 * * * ~/.claude/scripts/stale-issue-checker.sh"
+fi
+
 echo ""
 echo "Done! Restart Claude Code for hooks to take effect."
 echo ""
 echo "What's installed:"
-echo "  Layer 1: verify-build.sh     — Auto type-check Swift/TS/Python/Go/Rust after edits"
-echo "  Layer 2: run-tests.sh        — Auto run Playwright/Jest/Vitest on backend changes"
+echo "  Layer 0: safety-gate.sh        — Block destructive Bash commands"
+echo "  Layer 1: verify-build.sh       — Auto type-check Swift/TS/Python/Go/Rust"
+echo "  Layer 2: run-tests.sh          — Auto run Playwright/Jest/Vitest"
 echo "  Layer 3: audit-e2e-coverage.sh — Check which routes have E2E tests"
-echo "  Layer 4: escalate-to-human.sh — Create GitHub issues for senior dev review"
-echo "  Safety:  safety-gate.sh      — Block destructive Bash commands"
+echo "  Layer 4: escalate-to-human.sh  — Create GitHub issues + email notification"
+echo "  Notify:  notify-human.sh       — Multi-channel notifications (macOS + email)"
+echo "  Cron:    stale-issue-checker.sh — 12h reminder, 24h team escalation"
 echo "  Analysis: flaky-test-detector.sh — Detect flaky tests from QA log"
-echo "  Cron:    weekly-coverage-audit.sh — Weekly coverage report"
+echo ""
+echo "Required setup — add to your ~/.zshrc:"
+echo "  export CLAUDE_QA_EMAIL=your@email.com             # Where to send alerts"
+echo "  export CLAUDE_QA_REVIEWER=github-handle            # For issue assignment"
+echo "  export CLAUDE_QA_REPOS='litsonco/repo1,litsonco/repo2'  # For stale checker"
+echo ""
+echo "Optional (enables email delivery):"
+echo "  export SENDGRID_API_KEY=SG.xxx                     # SendGrid for reliable email"
 echo ""
 echo "Quick start:"
 echo "  audit-e2e-coverage.sh /path/to/project    # Check test coverage"
 echo "  flaky-test-detector.sh --days 7            # Detect flaky tests"
-echo ""
-echo "Set CLAUDE_QA_REVIEWER=github-handle for auto-assigned escalations."
+echo "  stale-issue-checker.sh --dry-run           # Preview stale issue reminders"

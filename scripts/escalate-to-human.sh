@@ -153,6 +153,33 @@ if [ $? -eq 0 ]; then
           --arg type "$ESCALATION_TYPE" --arg issue "$ISSUE_URL" \
       '{timestamp:$ts,hook:"escalate-to-human",file:$file,type:$type,issue:$issue}' \
       >> "$QA_LOG" 2>/dev/null || true
+
+    # --- Send immediate notification via all channels ---
+    SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+    if [ -x "$SCRIPTS_DIR/notify-human.sh" ]; then
+        URGENCY="normal"
+        case "$ESCALATION_TYPE" in
+            security-review) URGENCY="high" ;;
+            build-failure|test-failure) URGENCY="normal" ;;
+        esac
+
+        "$SCRIPTS_DIR/notify-human.sh" \
+            --subject "QA Escalation: $TITLE" \
+            --body "Claude Code's QA system needs human help.
+
+Type: $ESCALATION_TYPE
+File: $FILE_PATH
+
+Error:
+$ERROR_CONTEXT
+
+Codex Analysis:
+$CODEX_DIAGNOSIS
+
+Action needed: Review the GitHub Issue and resolve or comment to acknowledge." \
+            --issue-url "$ISSUE_URL" \
+            --urgency "$URGENCY" || true
+    fi
 else
     echo "❌ Failed to create issue: $ISSUE_URL"
     exit 1
