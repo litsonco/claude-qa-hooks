@@ -1,8 +1,8 @@
 # Claude Code QA Hooks
 
-**Automated build verification, test running, safety gating, and human escalation for Claude Code.**
+**Automated QA, security testing, and human escalation for AI-assisted development.**
 
-Catches compilation errors the moment they're introduced, runs E2E tests on backend changes, blocks destructive commands before they execute, and escalates to senior developers when AI can't self-fix. Works across Swift, TypeScript, Python, Go, Rust, and any Xcode/Node/Python/Go/Cargo project.
+A 6-layer quality system that runs inside Claude Code. It type-checks every edit, runs tests on backend changes, blocks dangerous commands, generates security tests from project-specific threat models, runs automated penetration scans, and escalates to senior developers (via email) when AI can't self-fix. Works across Swift, TypeScript, Python, Go, and Rust.
 
 ## Quick Install
 
@@ -10,472 +10,281 @@ Catches compilation errors the moment they're introduced, runs E2E tests on back
 curl -fsSL https://raw.githubusercontent.com/litsonco/claude-qa-hooks/main/install.sh | bash
 ```
 
-Then restart Claude Code.
+Then add to `~/.zshrc`:
 
-> **Note:** The installer **appends** to your existing `~/.claude/settings.json` hooks — it will never overwrite your existing configuration. Requires `jq`.
+```bash
+export CLAUDE_QA_EMAIL=you@company.com
+export CLAUDE_QA_REVIEWER=your-github-handle
+export CLAUDE_QA_REPOS='litsonco/repo1,litsonco/repo2'
+```
+
+Restart Claude Code. Hooks are global — they fire on every project automatically.
 
 ---
 
 ## Architecture
 
 ```
-                         You edit code via Claude Code
-                                    |
-                    +-------------------------------+
-                    |       LAYER 0: SAFETY GATE     |
-                    |  PreToolUse — blocks dangerous  |
-                    |  Bash commands before execution  |
-                    +-------------------------------+
-                                    |
-                                 ALLOWED
-                                    |
-                    +-------------------------------+
-                    |     PostToolUse Hook Fires     |
-                    |   (after every Edit / Write)   |
-                    +-------------------------------+
-                                    |
-                         What file was edited?
-                                    |
-         +----------+----------+----------+----------+----------+
-         |          |          |          |          |          |
-    .swift      .ts/.tsx      .py        .go        .rs     other
-         |          |          |          |          |          |
-         v          v          v          v          v          |
-  +-----------+ +--------+ +--------+ +--------+ +--------+   |
-  | xcodebuild| |  tsc   | |py_comp.| |go vet  | |cargo   |   |
-  | (compile) | |(types) | |(syntax)| |(vet)   | |(check) |   |
-  +-----------+ +--------+ +--------+ +--------+ +--------+   |
-         |          |          |          |          |          |
-         |     Route/handler?  |          |          |          |
-         |     +----+----+     |          |          |          |
-         |    YES       NO     |          |          |          |
-         |     |         |     |          |          |          |
-         |     v         |     |          |          |          |
-         | +----------+  |     |          |          |          |
-         | |Playwright|  |     |          |          |          |
-         | |Jest/Vite |  |     |          |          |          |
-         | +----------+  |     |          |          |          |
-         |     |         |     |          |          |          |
-         +--+--+---------+-----+----------+----------+----------+
-            |            |
-         PASSED        FAILED
-            |            |
-            v            v
-     +----------+  +--------------------+
-     |   Done   |  | Claude reads error  |
-     | Continue |  | Can fix in <2 min?  |
-     | working  |  +--------------------+
-     +----------+         |          |
-                         YES         NO
-                          |          |
-                          v          v
-                   +---------+  +------------------+
-                   | Fix it  |  | Spawn Codex      |
-                   | Re-run  |  | agent in          |
-                   | hook    |  | background        |
-                   +---------+  +------------------+
-                                        |
-                                        v
-                                Codex returns fix?
-                                   |          |
-                                  YES         NO
-                                   |          |
-                                   v          v
-                            +---------+  +------------------------+
-                            |Implement|  | LAYER 4: ESCALATE      |
-                            |fix, hook|  | TO HUMAN               |
-                            |re-runs  |  | → GitHub Issue created  |
-                            +---------+  | → Senior dev assigned   |
-                                         | → Full context attached |
-                                         +------------------------+
-```
+ ┌─────────────────────────────────────────────────────────────────────────┐
+ │                        DEVELOPER EDITS CODE                            │
+ │                        via Claude Code                                  │
+ └───────────────────────────────┬─────────────────────────────────────────┘
+                                 │
+         ┌───────────────────────▼───────────────────────┐
+         │            LAYER 0: SAFETY GATE               │
+         │    PreToolUse — fires BEFORE Bash commands     │
+         │                                               │
+         │  Blocks: rm -rf, git push --force, DROP TABLE │
+         │          git reset --hard, dd of=/dev/,       │
+         │          curl|sudo bash, DELETE FROM (no WHERE)│
+         └───────────────────────┬───────────────────────┘
+                                 │ ALLOWED
+         ┌───────────────────────▼───────────────────────┐
+         │            LAYER 1: BUILD VERIFY              │
+         │    PostToolUse — fires AFTER every edit        │
+         │                                               │
+         │  .swift → xcodebuild    .ts → tsc --noEmit   │
+         │  .py    → py_compile    .go → go vet          │
+         │  .rs    → cargo check                         │
+         └───────────────────────┬───────────────────────┘
+                                 │
+                    ┌────────────▼────────────┐
+                    │  Route / handler edit?   │
+                    └──────┬─────────┬────────┘
+                          YES        NO
+                           │          │
+         ┌─────────────────▼──┐       │
+         │  LAYER 2: TESTS    │       │
+         │  Playwright E2E    │       │
+         │  Jest / Vitest     │       │
+         └─────────┬──────────┘       │
+                   │                  │
+         ┌─────────▼──────────────────▼──┐
+         │          PASS or FAIL?         │
+         └──────┬─────────────────┬──────┘
+               PASS              FAIL
+                │                 │
+                │      ┌──────────▼──────────┐
+                │      │ Claude self-fix     │
+                │      │ (< 2 min, obvious)  │
+                │      └──────┬──────┬───────┘
+                │            FIXED  CAN'T FIX
+                │              │       │
+                │              │  ┌────▼─────────────┐
+                │              │  │ Codex agent       │
+                │              │  │ (background)      │
+                │              │  └────┬──────┬───────┘
+                │              │      FIXED  CAN'T FIX
+                │              │        │       │
+         ┌──────▼──────────────▼────────▼──┐    │
+         │          CONTINUE               │    │
+         │          WORKING                │    │
+         └─────────────────────────────────┘    │
+                                                │
+         ┌──────────────────────────────────────▼──────────────────────────┐
+         │                    LAYER 4: HUMAN ESCALATION                    │
+         │                                                                 │
+         │  1. GitHub Issue created (full error + Codex analysis)          │
+         │  2. Email sent immediately to CLAUDE_QA_EMAIL                   │
+         │  3. macOS notification with sound                               │
+         │                                                                 │
+         │  If no response in 12h → email reminder + GitHub comment        │
+         │  If no response in 24h → email entire team + 'urgent' label     │
+         └─────────────────────────────────────────────────────────────────┘
 
-All results are logged to `~/.claude/qa-log.jsonl` for trend analysis and flaky test detection.
+ ┌─────────────────────────────────────────────────────────────────────────┐
+ │                     LAYER 3: COVERAGE AUDIT                            │
+ │                     (on demand + weekly cron)                           │
+ │                                                                         │
+ │  Scans all routes → checks for matching E2E specs → reports gaps       │
+ │  Scans all specs  → checks 7 security categories → reports gaps        │
+ │  Reads threat-model.json → verifies risks have tests → reports gaps    │
+ └─────────────────────────────────────────────────────────────────────────┘
+
+ ┌─────────────────────────────────────────────────────────────────────────┐
+ │                     LAYER 5: AUTOMATED PENTEST                         │
+ │                     (weekly via OWASP ZAP)                              │
+ │                                                                         │
+ │  Crawls API → fuzzes parameters → tests attack chains → checks CVEs   │
+ │  Auto-escalates to email on high-risk findings                         │
+ └─────────────────────────────────────────────────────────────────────────┘
+
+ ┌─────────────────────────────────────────────────────────────────────────┐
+ │                     THREAT MODEL (per project)                         │
+ │                                                                         │
+ │  threat-model.json defines project-specific risks:                     │
+ │    Clemency: PII, role escalation, legal docs, content moderation      │
+ │    ReadBy:   COPPA, voice biometrics, AI prompt injection, family IDOR │
+ │                                                                         │
+ │  Auto-generated from project docs, data models, and code patterns      │
+ │  Drift detection alerts when the model falls behind the code           │
+ └─────────────────────────────────────────────────────────────────────────┘
+
+ ┌─────────────────────────────────────────────────────────────────────────┐
+ │                     OBSERVABILITY                                       │
+ │                                                                         │
+ │  qa-log.jsonl ─── every hook result logged ─── flaky test detection    │
+ │                                              ─── weekly trend reports   │
+ └─────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## The Five Layers
+## The Six Layers
 
-### Layer 0: Safety Gate (`safety-gate.sh`) — NEW
+### Layer 0: Safety Gate
 
-**PreToolUse hook** that fires *before* Bash commands execute. Blocks destructive operations:
+**PreToolUse hook** — fires *before* Bash commands execute. Blocks destructive operations.
 
-| Pattern | What's Blocked | Why |
-|---------|---------------|-----|
-| `rm -rf /`, `rm -rf ~` | Broad recursive deletes | Prevents catastrophic file loss |
-| `git push --force` | Force push to remote | Can overwrite team's work; use `--force-with-lease` |
-| `git reset --hard` | Hard reset | Discards uncommitted changes permanently |
-| `git clean -f` | Force clean untracked | Permanently deletes untracked files |
-| `DROP TABLE`, `TRUNCATE` | Database destruction | Irreversible data loss |
-| `DELETE FROM x` (no WHERE) | Full table delete | Almost always a mistake |
-| `curl ... \| sudo bash` | Piped script execution | Download and inspect first |
-| `dd ... of=/dev/` | Raw device writes | Can overwrite entire disks |
-| `mkfs` | Filesystem format | Destroys all data on device |
+| Blocked | Why |
+|---------|-----|
+| `rm -rf /`, `rm -rf ~`, `rm -rf .` | Catastrophic file deletion |
+| `git push --force` | Overwrites team's remote history |
+| `git reset --hard` | Discards uncommitted work permanently |
+| `DROP TABLE`, `TRUNCATE`, `DELETE FROM` (no WHERE) | Irreversible data destruction |
+| `curl \| sudo bash` | Untrusted remote code execution |
+| `dd of=/dev/`, `mkfs` | Disk/filesystem destruction |
 
-Set `CLAUDE_SKIP_SAFETY_GATE=true` to disable temporarily.
+### Layer 1: Build Verification
 
-### Layer 1: Build Verification (`verify-build.sh`)
+**PostToolUse hook** — fires after every `Edit` or `Write`. Type-checks only (not full builds), fast enough for every edit.
 
-Fires after every `Edit` or `Write` on source files. Detects the project type from the file extension and runs the fastest possible compilation check.
+| Language | Tool | Speed |
+|----------|------|-------|
+| Swift | `xcodebuild` (compile, no signing) | ~30-60s |
+| TypeScript | `npx tsc --noEmit` | ~5-15s |
+| Python | `python3 -m py_compile` | <1s |
+| Go | `go vet ./...` | ~5-15s |
+| Rust | `cargo check` | ~10-30s |
 
-| File Type | What Runs | What It Catches | Speed |
-|-----------|-----------|-----------------|-------|
-| `.swift` | `xcodebuild` (generic iOS, no signing) | Type errors, missing imports, protocol conformance | ~30-60s |
-| `.ts` / `.tsx` | `npx tsc --noEmit` | Type errors, interface mismatches, import issues | ~5-15s |
-| `.py` | `python3 -m py_compile` | Syntax errors, indentation issues | <1s |
-| `.go` | `go vet ./...` | Type errors, suspicious constructs, common mistakes | ~5-15s |
-| `.rs` | `cargo check` | Type errors, borrow checker, lifetime issues | ~10-30s |
+### Layer 2: Test Runner
 
-**Key design decision:** Type-checking only, not full builds. Fast enough to run on every edit without disrupting flow.
+Fires on backend TypeScript/JavaScript edits. Framework auto-detected.
 
-### Layer 2: Test Runner (`run-tests.sh`)
+| File Changed | What Runs |
+|-------------|-----------|
+| `src/routes/*`, `src/handlers/*`, `src/middleware/*` | Playwright E2E (full suite) |
+| `src/utils/*` | Jest/Vitest (related tests only) |
+| `e2e/*.spec.ts` | Playwright (that spec only) |
+| `*.tsx` (frontend) | Type-check only (E2E too slow per edit) |
 
-Fires after editing TypeScript/JavaScript files. Detects the test framework and runs the appropriate suite, but only when it matters.
+### Layer 3: Coverage & Security Audit
 
-| What Changed | What Runs | Why |
-|-------------|-----------|-----|
-| `src/routes/*` | Playwright E2E (full suite) | Route changes can break API contracts |
-| `src/handlers/*` | Playwright E2E (full suite) | Handler logic affects API behavior |
-| `src/middleware/*` | Playwright E2E (full suite) | Middleware changes affect all routes |
-| `src/utils/*` | Jest (related tests only) | Utility changes need unit verification |
-| `e2e/*.spec.ts` | Playwright (that spec only) | Verify the test itself passes |
-| `*.tsx` (frontend) | Nothing (type-check only) | E2E is too slow for every UI edit |
-
-**Supported frameworks:** Playwright, Jest, Vitest (with `--related` file targeting). Auto-detected from config files.
-
-**Note:** Type-checking is handled by Layer 1 (`verify-build.sh`). The test runner does not duplicate the tsc call.
-
-### Layer 3: Coverage Audit (`audit-e2e-coverage.sh`)
-
-On-demand script that compares your API routes against E2E test specs and reports gaps.
+Three audit scripts that check for gaps:
 
 ```bash
+# Functional test coverage — which routes have E2E specs?
 ~/.claude/scripts/audit-e2e-coverage.sh /path/to/project
-~/.claude/scripts/audit-e2e-coverage.sh --json /path/to/project  # For scripting
-~/.claude/scripts/audit-e2e-coverage.sh --help
+
+# Security test coverage — IDOR, injection, race conditions covered?
+~/.claude/scripts/security-test-audit.sh /path/to/project
+
+# Threat model freshness — has the code outgrown the threat model?
+~/.claude/scripts/threat-model-refresh.sh /path/to/project
 ```
 
-**Example output:**
-```
-E2E Coverage Audit: backend
-================================================
+### Layer 4: Human Escalation + Notifications
 
-Express API Routes:
+When Claude + Codex both fail:
 
-  ✅ auth → e2e/auth.spec.ts
-  ✅ stories → e2e/stories.spec.ts
-  ✅ gifts → e2e/gifts.spec.ts
-  ❌ payments → NO E2E SPEC
-  ❌ voiceProfiles → NO E2E SPEC
+1. **Immediately:** GitHub Issue created + email + macOS notification
+2. **12 hours, no response:** Reminder email + GitHub comment
+3. **24 hours, no response:** Team-wide email + `urgent` label
 
-================================================
-⚠️  2 route(s) missing E2E coverage
-```
+### Layer 5: Automated Pentesting
 
-**Supported project types:**
-
-| Type | Scans | Matches Against |
-|------|-------|-----------------|
-| **Express/Node** | `src/routes/*.ts` | `e2e/<route>.spec.ts` |
-| **FastAPI/Python** | `app/routers/*.py` | `e2e/<router>.spec.ts` |
-| **Next.js** | `app/**/page.tsx` | `e2e/web/<page>.spec.ts` |
-
-### Layer 4: Human Escalation (`escalate-to-human.sh`) — NEW
-
-When Claude + Codex both fail to resolve an issue, this script creates a GitHub Issue with full context for senior developer review.
+OWASP ZAP via Docker — actual attack simulation beyond what specs can do.
 
 ```bash
-# Automatic (called by Claude's escalation protocol):
-~/.claude/scripts/escalate-to-human.sh \
-    --error "error output here" \
-    --file "/path/to/failing/file.ts" \
-    --codex "Codex analysis here" \
-    --type build-failure
-
-# Preview without creating:
-~/.claude/scripts/escalate-to-human.sh --dry-run \
-    --error "..." --file "..." --type security-review
+~/.claude/scripts/pentest-scan.sh --target http://localhost:8001 --scan-type quick   # ~5 min
+~/.claude/scripts/pentest-scan.sh --target http://localhost:8001 --scan-type full    # ~30 min
 ```
 
-**Escalation types:**
+Auto-escalates to email on high-risk findings.
 
-| Type | When | Label |
-|------|------|-------|
-| `build-failure` | Build hook fails, Claude + Codex can't fix | `qa-hook,needs-human` |
-| `test-failure` | Tests fail, Claude + Codex can't fix | `qa-hook,needs-human` |
-| `security-review` | Auth/payment/secrets code was changed | `qa-hook,needs-human,security` |
-| `architecture-review` | Multi-file changes (>5 files) | `qa-hook,needs-human,architecture` |
+---
 
-**Configuration:**
+## Threat Models
+
+Each project has a `threat-model.json` defining its specific risks. This drives security test generation — generic tests plus project-specific tests.
+
+**Example risks by project:**
+
+| Clemency Project | ReadBy / StoryTime |
+|------------------|--------------------|
+| PII of justice-impacted individuals | Children's data (COPPA regulated) |
+| 4-tier role escalation (user → admin) | Family account boundary (cross-family IDOR) |
+| Legal document uploads | Voice recording theft (biometric data) |
+| Contact form email relay abuse | AI prompt injection in story generation |
+| OG image path traversal | Gift code brute force |
+| Moderation data leaks | Notification content safety for children |
+
+**Threat models auto-update** as the codebase changes:
+
 ```bash
-export CLAUDE_QA_REVIEWER=github-handle    # Auto-assign issues
-export CLAUDE_QA_LABELS=qa-hook,needs-human  # Custom labels
+# Generate a threat model from project docs, data models, and code patterns
+~/.claude/scripts/threat-model-generator.sh /path/to/project
+
+# Check if the threat model has drifted behind the code
+~/.claude/scripts/threat-model-refresh.sh /path/to/project
 ```
 
 ---
 
-## Where Senior Developers Fit In
+## Security Test Framework
 
-The QA hooks create a 5-layer system where AI handles routine checks and humans focus on judgment calls:
+Every route gets TWO spec files:
 
-```
-Layer 0 (Safety Gate)     → Automatic — blocks dangerous commands
-Layer 1 (Build Verify)    → Automatic — catches type/compile errors
-Layer 2 (Test Runner)     → Automatic — runs relevant tests
-Layer 3 (Coverage Audit)  → Weekly — humans prioritize gaps
-Layer 4 (Human Escalation) → On-demand — AI can't fix, human steps in
-```
+| File | What It Tests |
+|------|--------------|
+| `route.spec.ts` | Happy paths + basic error cases (does the feature work?) |
+| `route.security.spec.ts` | IDOR, injection, race conditions, rate limits, boundary inputs, enumeration, file upload abuse |
 
-### When Humans Are Involved
+Security specs use `e2e/security-helpers.ts` — reusable utilities:
 
-| Trigger | What Happens | How |
-|---------|-------------|-----|
-| **Codex fails twice** | GitHub Issue created with full error context | `escalate-to-human.sh` |
-| **Security code changed** | PR auto-requests review from CODEOWNERS | `CODEOWNERS` file |
-| **>500 lines in a sprint** | Architecture review requested | Codex proactive invocation |
-| **Flaky test detected** | Issue filed after 3 flips in 7 days | `flaky-test-detector.sh --escalate` |
-| **Weekly coverage audit** | Report posted for team triage | `weekly-coverage-audit.sh` |
-| **New E2E spec by Claude** | Marked for human review | `// NEEDS-HUMAN-REVIEW` convention |
-
-### What Humans Review (Priority Order)
-
-1. **New E2E specs** — Claude writes good happy-path tests but misses edge cases, race conditions, and security assertions
-2. **Multi-file architecture** — When Claude touches 5+ files, review the *design*, not just correctness
-3. **Flaky test triage** — Only domain experts can distinguish real bugs from timing issues
-4. **Coverage gap prioritization** — Decide which gaps matter (payments > settings page)
-5. **Monthly QA tuning** — Review `qa-log.jsonl` trends. Are hooks catching real bugs or noise?
-
-### CODEOWNERS
-
-The included `CODEOWNERS` file auto-requests review when PRs touch:
-- Auth, sessions, permissions, tokens
-- Payments, billing, Stripe
-- Dockerfiles, CI/CD, deploy scripts
-- Database migrations
-- Environment/secrets files
-- The QA hooks themselves
-
-Edit `CODEOWNERS` to set your team's GitHub handles.
+| Helper | What It Tests |
+|--------|--------------|
+| `testIDOR()` | Can user A access user B's resource? |
+| `testInjection()` | SQL, NoSQL, XSS, path traversal, command injection payloads |
+| `testConcurrent()` | N simultaneous requests — does data corrupt? |
+| `testRateLimit()` | Rapid-fire requests — does 429 kick in? |
+| `testOversizedUpload()` | 100MB file upload — crash or reject? |
+| `testDisguisedFileType()` | EXE renamed to PDF — detected? |
+| `testPathTraversalUpload()` | `../../../etc/passwd` as filename |
+| `testEnumeration()` | Do "not found" vs "forbidden" leak existence? |
+| `testBoundaryInputs()` | Empty, 10K chars, unicode, null bytes, extreme numbers |
 
 ---
 
-## Notification System
+## Where Humans Fit In
 
-Humans get notified through multiple channels with escalating urgency:
+AI handles the volume. Humans handle the judgment.
 
-```
-Escalation happens
-    |
-    v
-IMMEDIATE (0h)
-    ├── macOS notification (pop-up + sound)
-    ├── Email to CLAUDE_QA_EMAIL (via SendGrid or system mail)
-    └── GitHub Issue created (triggers GitHub notification email)
-    |
-    v
-REMINDER (12h, no response)
-    ├── Email reminder: "This issue needs review"
-    └── GitHub Issue comment (triggers another notification)
-    |
-    v
-ESCALATION (24h, no response)
-    ├── Email to full team (CC list)
-    ├── GitHub Issue comment: "ESCALATION: 24-hour deadline passed"
-    └── 'urgent' label added to issue
-```
+| AI Handles Automatically | Humans Handle |
+|-------------------------|---------------|
+| Type-check every edit | Review threat model severity ratings |
+| Run tests on backend changes | Triage flaky tests (real bug or timing?) |
+| Block dangerous commands | Prioritize coverage gaps (payments > settings) |
+| Generate security tests from threat model | Review new E2E specs for edge cases |
+| Detect stale threat models | Add business-context risks code can't detect |
+| Send email alerts on failures | Decide when to invest in external pentesting |
+| Log trends and detect flaky tests | Monthly tuning — are hooks catching real bugs? |
 
-### Setup
-
-Add to `~/.zshrc`:
-
-```bash
-# Required — where to send alerts
-export CLAUDE_QA_EMAIL=you@company.com
-
-# Required — repos to monitor for stale issues
-export CLAUDE_QA_REPOS='litsonco/clemency-backend,litsonco/storytime-magic'
-
-# Optional — CC on escalation emails
-export CLAUDE_QA_EMAIL_CC=team@company.com
-
-# Optional — enables reliable email delivery (falls back to system mail)
-export SENDGRID_API_KEY=SG.xxx
-```
-
-### How Notifications Are Sent
-
-| Channel | When | Requires |
-|---------|------|----------|
-| **macOS notification** | Every escalation (immediate) | macOS only, always works |
-| **Email (SendGrid)** | Every escalation + reminders | `SENDGRID_API_KEY` env var |
-| **Email (system mail)** | Fallback if no SendGrid | `/usr/bin/mail` (built into macOS) |
-| **GitHub notification** | Issue created/commented | GitHub email notifications enabled |
-
-### Stale Issue Checker (`stale-issue-checker.sh`)
-
-Runs every 2 hours via launchd (installed automatically on macOS). Finds open `needs-human` issues and sends reminders.
-
-```bash
-# Manual run
-~/.claude/scripts/stale-issue-checker.sh
-
-# Preview without sending
-~/.claude/scripts/stale-issue-checker.sh --dry-run
-
-# Custom thresholds
-~/.claude/scripts/stale-issue-checker.sh --remind-after 6 --escalate-after 12
-```
-
-### Direct Notification (`notify-human.sh`)
-
-Send a notification manually through all channels:
-
-```bash
-~/.claude/scripts/notify-human.sh \
-    --subject "Something needs attention" \
-    --body "Details here" \
-    --urgency high \
-    --issue-url "https://github.com/..."
-```
+**CODEOWNERS** auto-requests human review on PRs touching: auth, payments, migrations, deploy configs, Dockerfiles, environment files, and the QA hooks themselves.
 
 ---
 
-## Codex Escalation Protocol
+## Observability
 
-When the build hook or test runner reports a failure, Claude follows this decision tree:
-
-```
-Hook reports failure
-    |
-    +-- Read the error + file/line
-    |
-    +-- Can Claude fix it in <2 minutes?
-    |       |
-    |      YES --> Fix it. Hook re-verifies on next edit.
-    |       |
-    |      NO  --> Is it obvious? (typo, missing import, wrong type)
-    |               |
-    |              YES --> Fix it. One more attempt allowed.
-    |               |
-    |              NO  --> Escalate to Codex
-    |
-    +-- Spawn Codex agent in background with:
-            - Exact error output
-            - Failing test name (if Playwright/Jest)
-            - Relevant source files
-            |
-            +-- Codex returns fix --> Claude implements --> Hook re-verifies --> Commit
-            |
-            +-- Codex fails --> ESCALATE TO HUMAN (Layer 4)
-                                → GitHub Issue with full context
-                                → Senior dev assigned
-```
-
-**Codex is also proactively invoked for:**
-- Sprints producing >500 lines of new code
-- Any security, auth, or payments code changes
-- Architecture decisions affecting multiple files
-- Flaky or intermittent test failures
-
----
-
-## Analysis Tools
-
-### Flaky Test Detector (`flaky-test-detector.sh`) — NEW
-
-Analyzes `~/.claude/qa-log.jsonl` to find tests that flip between pass/fail:
+All hooks log to `~/.claude/qa-log.jsonl`:
 
 ```bash
-~/.claude/scripts/flaky-test-detector.sh                  # Last 7 days, threshold 3
-~/.claude/scripts/flaky-test-detector.sh --days 30         # Last 30 days
-~/.claude/scripts/flaky-test-detector.sh --json            # Machine-readable output
-~/.claude/scripts/flaky-test-detector.sh --escalate        # Auto-create issues for flaky tests
+# Flaky test detection
+~/.claude/scripts/flaky-test-detector.sh --days 7
+
+# Weekly coverage + health report across all projects
+~/.claude/scripts/weekly-coverage-audit.sh --projects "$CLAUDE_QA_PROJECTS"
 ```
-
-**Example output:**
-```
-📊 QA Flaky Test Report (last 7 days)
-================================================
-
-Summary:
-  Total hook runs:  142
-  Passed:           128
-  Failed:           14
-  Escalations:      2
-
-🔄 Flaky Files (pass + fail within 7 days):
-  ⚠️  src/routes/payments.ts  (8x pass, 3x fail)
-
-🔴 Chronic Failures (≥3 failures in 7 days):
-  ❌ src/middleware/auth.ts  (5 failures)
-```
-
-### Weekly Coverage Audit (`weekly-coverage-audit.sh`) — NEW
-
-Runs coverage audits across multiple projects and generates a report:
-
-```bash
-# On-demand
-~/.claude/scripts/weekly-coverage-audit.sh \
-    --projects /path/to/proj1,/path/to/proj2
-
-# Post to GitHub Discussions
-~/.claude/scripts/weekly-coverage-audit.sh \
-    --projects "$CLAUDE_QA_PROJECTS" \
-    --output github --repo litsonco/claude-qa-hooks
-
-# Write to file (for cron)
-~/.claude/scripts/weekly-coverage-audit.sh \
-    --projects "$CLAUDE_QA_PROJECTS" \
-    --output file
-```
-
-**Cron setup (Monday 8am):**
-```bash
-0 8 * * 1 CLAUDE_QA_PROJECTS="/path/to/proj1,/path/to/proj2" ~/.claude/scripts/weekly-coverage-audit.sh --output file
-```
-
----
-
-## QA Log (`qa-log.jsonl`)
-
-All hooks append structured JSON to `~/.claude/qa-log.jsonl`:
-
-```jsonl
-{"timestamp":"2026-03-29T10:15:00Z","hook":"verify-build","file":"/path/to/file.ts","status":"pass","lang":"typescript","detail":"no errors"}
-{"timestamp":"2026-03-29T10:16:00Z","hook":"run-tests","file":"/path/to/file.ts","status":"fail","framework":"playwright","detail":"2/15 failed"}
-{"timestamp":"2026-03-29T10:20:00Z","hook":"safety-gate","command":"git reset --hard","action":"blocked","reason":"BLOCKED: git reset --hard discards uncommitted changes"}
-{"timestamp":"2026-03-29T10:25:00Z","hook":"escalate-to-human","file":"/path/to/file.ts","type":"build-failure","issue":"https://github.com/..."}
-```
-
-**Customize location:** `export CLAUDE_QA_LOG=/path/to/custom-log.jsonl`
-
----
-
-## How Hooks Work (Technical)
-
-Claude Code hooks are configured in `~/.claude/settings.json`. The harness passes tool call data as JSON on stdin:
-
-**PreToolUse** (before execution — safety gate):
-```json
-{
-  "tool_name": "Bash",
-  "tool_input": { "command": "git reset --hard" }
-}
-```
-
-Returns `decision: "block"` to prevent execution, or exits 0 to allow.
-
-**PostToolUse** (after execution — build verify + tests):
-```json
-{
-  "tool_name": "Edit",
-  "tool_input": { "file_path": "/path/to/file.swift", "old_string": "...", "new_string": "..." },
-  "tool_response": { "success": true }
-}
-```
-
-Returns `additionalContext` which is injected back into Claude's context window.
 
 ---
 
@@ -483,100 +292,86 @@ Returns `additionalContext` which is injected back into Claude's context window.
 
 ```
 ~/.claude/
-  settings.json              # Hook configuration (Pre/PostToolUse triggers)
-  qa-log.jsonl               # Append-only log of all hook results
+  settings.json                          # Hook configuration
+  qa-log.jsonl                           # All hook results (append-only)
   scripts/
-    safety-gate.sh           # Layer 0: Block destructive Bash commands
-    verify-build.sh          # Layer 1: Build/type verification
-    run-tests.sh             # Layer 2: Test runner
-    audit-e2e-coverage.sh    # Layer 3: Coverage gap reporter
-    escalate-to-human.sh     # Layer 4: Human escalation via GitHub Issues + email
-    notify-human.sh          # Notification: Multi-channel alerts (macOS + email)
-    stale-issue-checker.sh   # Cron: 12h reminder, 24h team escalation
-    flaky-test-detector.sh   # Analysis: Flaky test detection from QA log
-    weekly-coverage-audit.sh # Cron: Weekly multi-project coverage report
-    com.litsonco.qa-stale-checker.plist  # macOS launchd config for stale checker
+    safety-gate.sh                       # Layer 0: Block destructive commands
+    verify-build.sh                      # Layer 1: Build/type verification
+    run-tests.sh                         # Layer 2: Test runner
+    audit-e2e-coverage.sh                # Layer 3: Functional test coverage
+    security-test-audit.sh               # Layer 3: Security test coverage
+    threat-model-refresh.sh              # Layer 3: Threat model drift detection
+    escalate-to-human.sh                 # Layer 4: GitHub Issues + email
+    notify-human.sh                      # Layer 4: Multi-channel notifications
+    stale-issue-checker.sh               # Layer 4: 12h/24h reminder cron
+    pentest-scan.sh                      # Layer 5: OWASP ZAP scanning
+    threat-model-generator.sh            # Context-aware threat model generation
+    flaky-test-detector.sh               # Observability: flaky test detection
+    weekly-coverage-audit.sh             # Observability: weekly reports
+    com.litsonco.qa-stale-checker.plist  # macOS launchd for stale checker
 
 Project root:
-  CODEOWNERS                 # Auto-request review for security-sensitive paths
+  threat-model.json                      # Project-specific security risks
+  CODEOWNERS                             # Auto-review for sensitive paths
+  e2e/
+    helpers.ts                           # Standard test helpers
+    security-helpers.ts                  # Security test utilities
+    *.spec.ts                            # Functional E2E specs
+    *.security.spec.ts                   # Security E2E specs
 ```
 
 ---
 
 ## Configuration
 
-### Environment Variables
-
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `CLAUDE_SKIP_BUILD_VERIFY` | Skip build verification | `false` |
-| `CLAUDE_SKIP_TESTS` | Skip test runner | `false` |
-| `CLAUDE_SKIP_SAFETY_GATE` | Skip safety gate | `false` |
-| `CLAUDE_QA_LOG` | QA log file location | `~/.claude/qa-log.jsonl` |
-| `CLAUDE_QA_REVIEWER` | GitHub handle for issue assignment | (none) |
-| `CLAUDE_QA_LABELS` | Labels for escalation issues | `qa-hook,needs-human` |
-| `CLAUDE_QA_PROJECTS` | Comma-separated project dirs for weekly audit | (none) |
-| `CLAUDE_QA_EMAIL` | Primary notification email address | (none) |
-| `CLAUDE_QA_EMAIL_CC` | CC addresses for escalation emails | (none) |
-| `CLAUDE_QA_REPOS` | Comma-separated repos for stale issue checker | (none) |
-| `SENDGRID_API_KEY` | SendGrid API key for email delivery | (falls back to system mail) |
-| `SENDGRID_FROM_EMAIL` | From address for SendGrid emails | `qa@litson.co` |
-
-### Customize test triggers
-
-Edit the `if` field in `~/.claude/settings.json` to control which file types trigger the test runner:
-
-```json
-{
-  "if": "Edit(*.ts)|Edit(*.tsx)|Write(*.ts)|Write(*.tsx)"
-}
-```
+| `CLAUDE_QA_EMAIL` | Where to send alerts | (required) |
+| `CLAUDE_QA_REVIEWER` | GitHub handle for issue assignment | (required) |
+| `CLAUDE_QA_REPOS` | Repos to monitor for stale issues | (required) |
+| `CLAUDE_QA_PROJECTS` | Project dirs for weekly audit | (optional) |
+| `CLAUDE_QA_EMAIL_CC` | CC on escalation emails | (optional) |
+| `CLAUDE_QA_LABELS` | Issue labels | `qa-hook,needs-human` |
+| `CLAUDE_QA_LOG` | Log file location | `~/.claude/qa-log.jsonl` |
+| `CLAUDE_SKIP_BUILD_VERIFY` | Disable build verification | `false` |
+| `CLAUDE_SKIP_TESTS` | Disable test runner | `false` |
+| `CLAUDE_SKIP_SAFETY_GATE` | Disable safety gate | `false` |
+| `SENDGRID_API_KEY` | Email delivery | (falls back to system mail) |
 
 ---
 
 ## Requirements
 
-| Requirement | What For |
-|-------------|----------|
-| Claude Code | Hook execution |
-| `jq` | JSON processing (install + all scripts) |
-| Xcode CLI tools | Swift projects (`xcodebuild`) |
-| Node.js | TypeScript projects (`npx tsc`) |
-| Python 3 | Python projects (`py_compile`) |
-| Go | Go projects (`go vet`) |
-| Rust/Cargo | Rust projects (`cargo check`) |
-| Playwright | E2E tests (`npx playwright test`) |
-| `gh` CLI | Human escalation + weekly reports |
-
-Only the tools for your project type are needed — the scripts detect what's available and skip gracefully.
+| Tool | What For | Required? |
+|------|----------|-----------|
+| Claude Code | Hook execution | Yes |
+| `jq` | JSON processing | Yes |
+| `gh` CLI | Issue creation, stale checking | Yes |
+| Docker | OWASP ZAP pentesting | For Layer 5 only |
+| Xcode, Node, Python, Go, Cargo | Language-specific type checking | Only for your languages |
+| Playwright, Jest, Vitest | Test execution | Only if tests exist |
 
 ---
 
 ## FAQ
 
 **Q: Will this slow down my Claude Code session?**
-A: Build verification adds 1-60 seconds per edit depending on language and project size (Python <1s, Rust ~30s). Tests add 10-30 seconds but only fire on backend route changes. The safety gate adds <100ms.
-
-**Q: What if I don't have Playwright set up?**
-A: The test runner exits silently if no `playwright.config.ts` is found. You only get build verification.
+Build verification adds 1-60 seconds per edit (Python <1s, Swift ~60s). Tests add 10-30 seconds but only fire on backend route changes. Safety gate adds <100ms.
 
 **Q: What if Codex can't fix it either?**
-A: Layer 4 kicks in — `escalate-to-human.sh` creates a GitHub Issue with the full error output, Codex analysis, and file context, then assigns it to your configured reviewer.
-
-**Q: Does this work for monorepos?**
-A: Yes. The scripts walk up the directory tree to find the nearest `tsconfig.json`, `.xcodeproj`, `go.mod`, `Cargo.toml`, or `package.json`.
-
-**Q: Can I use this without Claude Code?**
-A: The scripts work standalone. Pipe JSON on stdin or pass a file path as an argument: `echo '{"tool_input":{"file_path":"src/index.ts"}}' | ~/.claude/scripts/verify-build.sh`
+Layer 4 creates a GitHub Issue, sends you an email immediately, and reminds you at 12h and 24h if you haven't responded.
 
 **Q: How do I add support for another language?**
-A: Add a new `if [ "$EXT" = "xyz" ]` block in `verify-build.sh`. Use the `find_up`, `emit`, and `log_result` helpers for consistency. See the Go/Rust blocks as templates.
+Add an `if [ "$EXT" = "xyz" ]` block in `verify-build.sh`. Use the Go/Rust blocks as templates.
 
-**Q: Will the installer overwrite my existing hooks?**
-A: No. The installer checks for existing hook entries by command path and only appends new ones. Your existing hooks, plugins, and MCP servers are preserved.
+**Q: Does this work for monorepos?**
+Yes. Scripts walk up the directory tree to find the nearest config file.
 
-**Q: How do I see what the hooks have been doing?**
-A: Run `flaky-test-detector.sh` for a summary, or inspect `~/.claude/qa-log.jsonl` directly. Each line is a JSON object with timestamp, hook name, file, status, and details.
+**Q: How does the threat model stay current?**
+Three mechanisms: (1) Claude updates it when adding routes/features, (2) `threat-model-refresh.sh` detects drift, (3) `threat-model-generator.sh` rebuilds it from project docs and code.
+
+**Q: What's the difference between the security specs and the pentest?**
+Security specs test specific patterns (IDOR, injection, race conditions) in your test suite. The pentest (ZAP) crawls your live API and tries real attacks — it finds misconfigurations, header issues, and attack chains that specs don't compose.
 
 ---
 
